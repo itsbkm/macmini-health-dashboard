@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd service for macmini-agent.py
+
+  INSTALL (run on each Mac mini):
+    1. Copy agent.py to: /opt/homebrew/bin/macmini-agent.py
+    2. Edit the two <string> paths below if your python3 is elsewhere
+       (check with: which python3)
+    3. Copy this file to: ~/Library/LaunchAgents/com.example.macmini-agent.plist
+    4. Load it:
+         launchctl load ~/Library/LaunchAgents/com.example.macmini-agent.plist
+    5. Check it's running:
+         curl http://localhost:8787/metrics
+
+  To stop/unload:
+         launchctl unload ~/Library/LaunchAgents/com.example.macmini-agent.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.example.macmini-agent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/opt/homebrew/bin/macmini-agent.py</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/macmini-agent.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/macmini-agent.err</string>
+</dict>
+</plist>

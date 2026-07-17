@@ -1,0 +1,16 @@
+{
+  "dashboard_port": 8080,
+  "refresh_seconds": 30,
+  "minis": [
+    {
+      "name": "Office Mini",
+      "host": "office-mini",
+      "port": 8787
+    },
+    {
+      "name": "Studio Mini",
+      "host": "studio-mini",
+      "port": 8787
+    }
+  ]
+}
