@@ -260,12 +260,10 @@ def render_card(m):
     cpu_series = get_metric_series(host_key, 1) if HISTORY_ENABLED else []
     mem_series = get_metric_series(host_key, 2) if HISTORY_ENABLED else []
     disk_series = get_metric_series(host_key, 3) if HISTORY_ENABLED else []
-    temp_series = get_metric_series(host_key, 4) if HISTORY_ENABLED else []
 
     cpu_spark = sparkline(cpu_series, 0, 100, threshold_color(cpu, 70, 90))
     mem_spark = sparkline(mem_series, 0, 100, threshold_color(mem, 70, 90))
     disk_spark = sparkline(disk_series, 0, 100, threshold_color(disk, 70, 90))
-    temp_spark = sparkline(temp_series, 20, 90, temp_color(temp), width=60, height=16)
 
     cpu_icon_color = threshold_color(cpu, 70, 90)
     mem_icon_color = threshold_color(mem, 70, 90)
@@ -296,7 +294,7 @@ def render_card(m):
             {disk_spark}
         </div>
         <div class="stats-line">
-            <span><span style="color:{t_color}">&#127777;&#65039;</span> {temp_str} {temp_spark}</span>
+            <span style="color:{t_color}">&#127777;&#65039; {temp_str}</span>
             <span>&#9201;&#65039; up {m["uptime_hours"]}h</span>
             <span>{m.get("tailscale_ip") or ""}</span>
         </div>
@@ -340,7 +338,6 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
     color:#999; margin-top:10px;
   }}
   .stats-line span {{ display:inline-flex; align-items:center; gap:4px; }}
-  .stats-line .spark {{ width:60px; height:14px; margin-top:0; }}
 </style>
 </head>
 <body>

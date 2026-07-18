@@ -181,13 +181,12 @@ rewrites on every poll; nothing needs to be created manually.
 
 ### Sparklines and color coding
 
-Each card shows a small trend line under CPU, memory, and disk usage, plus a
-short one next to the temperature reading, built from the samples in
-`history.json`. The CPU/memory/disk icons, bars, and sparklines turn orange
-at 70% and red at 90%. The temperature icon and its sparkline turn orange at
-65°C and red at 80°C, tuned for typical Apple Silicon Mac mini idle/load
-ranges — adjust `TEMP_WARN_C` / `TEMP_DANGER_C` near the top of
-`dashboard.py` if your hardware runs hotter or cooler.
+Each card shows a small trend line under CPU, memory, and disk usage, built
+from the samples in `history.json`. The CPU/memory/disk icons, bars, and
+sparklines turn orange at 70% and red at 90%. The temperature reading (icon
+and text) turns orange at 65°C and red at 80°C, tuned for typical Apple
+Silicon Mac mini idle/load ranges — adjust `TEMP_WARN_C` / `TEMP_DANGER_C`
+near the top of `dashboard.py` if your hardware runs hotter or cooler.
 
 ### Running the dashboard in the background
 
