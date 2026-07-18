@@ -1,0 +1,14 @@
+[Unit]
+Description=Mac Mini Health Dashboard
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/var/www/macmini-health-dashboard
+ExecStart=/usr/bin/python3 /var/www/macmini-health-dashboard/dashboard.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

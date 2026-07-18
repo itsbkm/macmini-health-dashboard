@@ -17,15 +17,24 @@ public internet.
   `8080`, and polls agents in the background to build a short rolling history
   (12 hours to 7 days, configurable) used for the trend sparklines.
 - `config.example.json`: copy this to `config.json` and add your own machines.
-- LaunchAgent plist examples for running both scripts in the background on macOS.
+- `com.example.macmini-agent.plist`: LaunchAgent example for running the agent
+  in the background on each Mac mini.
+- `macmini-dashboard.service`: systemd unit example for running the dashboard
+  in the background on a Linux host. `com.example.macmini-dashboard.plist` is
+  also included if you'd rather run the dashboard on a Mac instead.
+
+`dashboard.py` only uses the Python standard library, so the dashboard host
+itself doesn't need to be a Mac — it can be a Linux box, a Raspberry Pi, or
+one of the Mac minis. The agent (`agent.py`) does need macOS + `psutil`, since
+it reads Mac-specific stats.
 
 ## Requirements
 
-- macOS on each monitored Mac.
-- Python 3.
+- macOS on each monitored Mac mini (for the agent).
+- Any machine with Python 3 for the dashboard host (Linux, macOS, Raspberry Pi, etc.).
 - Tailscale or another private network path between the dashboard and agents.
 - `psutil` on each agent machine.
-- Optional temperature tool:
+- Optional temperature tool on each agent machine:
   - Apple Silicon: `smctemp`
   - Intel Mac: `osx-cpu-temp`
 
@@ -180,7 +189,28 @@ at 70% and red at 90%. The temperature icon and its sparkline turn orange at
 ranges — adjust `TEMP_WARN_C` / `TEMP_DANGER_C` near the top of
 `dashboard.py` if your hardware runs hotter or cooler.
 
-To install the dashboard as a background LaunchAgent:
+### Running the dashboard in the background
+
+**On Linux (systemd)** — clone the repo to its final location first (e.g.
+`/var/www/macmini-health-dashboard`, or wherever `config.json` already lives),
+then:
+
+```bash
+sudo cp macmini-dashboard.service /etc/systemd/system/macmini-dashboard.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now macmini-dashboard.service
+```
+
+The unit file assumes the repo lives at `/var/www/macmini-health-dashboard`
+and `python3` is at `/usr/bin/python3` — edit `WorkingDirectory` and
+`ExecStart` in `macmini-dashboard.service` first if either differs on your
+system. Check it's up with:
+
+```bash
+systemctl status macmini-dashboard.service
+```
+
+**On macOS**, install it as a background LaunchAgent instead:
 
 ```bash
 sudo cp dashboard.py /opt/homebrew/bin/macmini-dashboard.py
@@ -207,22 +237,32 @@ http://<dashboard-host>:8080/metrics.json
 
 ## Managing Services
 
-Unload the agent:
+Unload the agent (on each Mac mini):
 
 ```bash
 launchctl unload ~/Library/LaunchAgents/com.example.macmini-agent.plist
 ```
 
-Unload the dashboard:
-
-```bash
-launchctl unload ~/Library/LaunchAgents/com.example.macmini-dashboard.plist
-```
-
-View logs:
+View agent logs:
 
 ```bash
 tail -f /tmp/macmini-agent.log /tmp/macmini-agent.err
+```
+
+**Dashboard on Linux (systemd):**
+
+```bash
+sudo systemctl stop macmini-dashboard.service      # stop it
+sudo systemctl disable macmini-dashboard.service   # stop it from starting on boot
+sudo rm /etc/systemd/system/macmini-dashboard.service
+sudo systemctl daemon-reload
+journalctl -u macmini-dashboard.service -f         # view logs
+```
+
+**Dashboard on macOS (LaunchAgent):**
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.example.macmini-dashboard.plist
 tail -f /tmp/macmini-dashboard.log /tmp/macmini-dashboard.err
 ```
 
