@@ -1,6 +1,11 @@
 {
   "dashboard_port": 8080,
   "refresh_seconds": 30,
+  "history": {
+    "enabled": true,
+    "poll_seconds": 300,
+    "retention_days": 1
+  },
   "minis": [
     {
       "name": "Office Mini",

@@ -19,6 +19,9 @@ Tailscale hostnames or IPs there. By default this script looks for
 
 import json
 import os
+import tempfile
+import threading
+import time
 from pathlib import Path
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -26,6 +29,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 PORT = 8080
 REFRESH_SECONDS = 30
 DEFAULT_CONFIG_PATH = Path(__file__).with_name("config.json")
+HISTORY_PATH = Path(os.environ.get("MACMINI_DASHBOARD_HISTORY", Path(__file__).with_name("history.json")))
+
+# How many samples a metric needs before we bother drawing a sparkline.
+MIN_SPARKLINE_SAMPLES = 2
+
+# History retention is expressed in days but clamped to a sane range so the
+# history.json file can't be configured into growing unbounded.
+MIN_RETENTION_DAYS = 0.5
+MAX_RETENTION_DAYS = 7
+MIN_POLL_SECONDS = 30
 
 
 def load_config():
@@ -48,10 +61,19 @@ def load_config():
             raise SystemExit("Each mini entry must include 'name' and 'host'.")
         mini.setdefault("port", 8787)
 
+    history_cfg = config.get("history", {})
+    retention_days = float(history_cfg.get("retention_days", 1))
+    retention_days = max(MIN_RETENTION_DAYS, min(MAX_RETENTION_DAYS, retention_days))
+    poll_seconds = int(history_cfg.get("poll_seconds", 300))
+    poll_seconds = max(MIN_POLL_SECONDS, poll_seconds)
+
     return {
         "port": int(config.get("dashboard_port", PORT)),
         "refresh_seconds": int(config.get("refresh_seconds", REFRESH_SECONDS)),
         "minis": minis,
+        "history_enabled": bool(history_cfg.get("enabled", True)),
+        "history_poll_seconds": poll_seconds,
+        "history_retention_days": retention_days,
     }
 
 
@@ -59,6 +81,97 @@ CONFIG = load_config()
 PORT = CONFIG["port"]
 REFRESH_SECONDS = CONFIG["refresh_seconds"]
 MINIS = CONFIG["minis"]
+HISTORY_ENABLED = CONFIG["history_enabled"]
+HISTORY_POLL_SECONDS = CONFIG["history_poll_seconds"]
+HISTORY_RETENTION_SECONDS = CONFIG["history_retention_days"] * 86400
+
+
+# --- History storage -------------------------------------------------------
+#
+# Samples are stored per-host as compact [timestamp, cpu, mem, disk, temp]
+# arrays (rather than one dict per sample) to keep history.json small. The
+# file is trimmed to HISTORY_RETENTION_SECONDS on every write, so its size
+# is bounded by (minis * retention_window / poll_interval), not by uptime.
+_history_lock = threading.Lock()
+
+
+def _load_history():
+    if not HISTORY_PATH.exists():
+        return {}
+    try:
+        with HISTORY_PATH.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+_HISTORY = _load_history()
+
+
+def _save_history_atomic(data):
+    fd, tmp_path = tempfile.mkstemp(dir=str(HISTORY_PATH.parent), prefix=".history-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, separators=(",", ":"))
+        os.replace(tmp_path, HISTORY_PATH)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def record_history_sample(results):
+    now = time.time()
+    cutoff = now - HISTORY_RETENTION_SECONDS
+    with _history_lock:
+        for m in results:
+            if m["_status"] != "online":
+                continue
+            host_key = m["_host_key"]
+            entry = _HISTORY.setdefault(host_key, {"name": m["_label"], "samples": []})
+            entry["name"] = m["_label"]
+            entry["samples"].append([
+                int(now),
+                m["cpu"]["percent"],
+                m["memory"]["percent"],
+                m["disk"]["percent"],
+                m.get("temperature_c"),
+            ])
+            entry["samples"] = [s for s in entry["samples"] if s[0] >= cutoff]
+
+        # Drop hosts no longer present in config.
+        known_keys = {mini["host"] for mini in MINIS}
+        for stale_key in list(_HISTORY.keys()):
+            if stale_key not in known_keys:
+                del _HISTORY[stale_key]
+
+        snapshot = json.loads(json.dumps(_HISTORY))
+
+    _save_history_atomic(snapshot)
+
+
+def get_history_snapshot():
+    with _history_lock:
+        return json.loads(json.dumps(_HISTORY))
+
+
+def get_metric_series(host_key, metric_index):
+    """metric_index: 1=cpu, 2=mem, 3=disk, 4=temp (index into the sample array)."""
+    with _history_lock:
+        samples = _HISTORY.get(host_key, {}).get("samples", [])
+        return [s[metric_index] for s in samples if s[metric_index] is not None]
+
+
+def history_poll_loop():
+    while True:
+        try:
+            results = [fetch_metrics(m) for m in MINIS]
+            record_history_sample(results)
+        except Exception:
+            pass
+        time.sleep(HISTORY_POLL_SECONDS)
 
 
 def fetch_metrics(mini):
@@ -68,21 +181,62 @@ def fetch_metrics(mini):
             data = json.loads(resp.read())
             data["_status"] = "online"
             data["_label"] = mini["name"]
+            data["_host_key"] = mini["host"]
             return data
     except Exception as e:
-        return {"_status": "offline", "_label": mini["name"], "_error": str(e)}
+        return {"_status": "offline", "_label": mini["name"], "_host_key": mini["host"], "_error": str(e)}
+
+
+COLOR_OK = "#4caf50"
+COLOR_WARN = "#fb8c00"
+COLOR_DANGER = "#e53935"
+
+# Apple Silicon Mac minis idle in the 35-50C range; sustained heavy load can
+# reach the 70s-80s before thermal throttling kicks in.
+TEMP_WARN_C = 65
+TEMP_DANGER_C = 80
+
+
+def threshold_color(value, warn, danger):
+    if value is None:
+        return "#888"
+    if value >= danger:
+        return COLOR_DANGER
+    if value >= warn:
+        return COLOR_WARN
+    return COLOR_OK
+
+
+def temp_color(temp_c):
+    return threshold_color(temp_c, TEMP_WARN_C, TEMP_DANGER_C)
 
 
 def bar(percent, warn=70, danger=90):
     percent = percent or 0
-    color = "#4caf50"
-    if percent >= danger:
-        color = "#e53935"
-    elif percent >= warn:
-        color = "#fb8c00"
+    color = threshold_color(percent, warn, danger)
     return f'''<div class="bar-track">
         <div class="bar-fill" style="width:{min(percent,100)}%;background:{color}"></div>
     </div>'''
+
+
+def sparkline(values, vmin, vmax, color, width=100, height=20):
+    """Inline SVG trend line for a series of floats. Returns '' if not enough data."""
+    if len(values) < MIN_SPARKLINE_SAMPLES:
+        return ""
+    span = max(vmax - vmin, 0.001)
+    step = width / (len(values) - 1)
+    points = []
+    for i, v in enumerate(values):
+        clamped = max(vmin, min(vmax, v))
+        x = i * step
+        y = height - ((clamped - vmin) / span) * height
+        points.append(f"{x:.1f},{y:.1f}")
+    path = " ".join(points)
+    return (
+        f'<svg class="spark" viewBox="0 0 {width} {height}" preserveAspectRatio="none">'
+        f'<polyline points="{path}" fill="none" stroke="{color}" stroke-width="1.5" '
+        f'stroke-linejoin="round" stroke-linecap="round"/></svg>'
+    )
 
 
 def render_card(m):
@@ -102,6 +256,22 @@ def render_card(m):
     temp = m.get("temperature_c")
     temp_str = f'{temp}°C' if temp is not None else "N/A"
 
+    host_key = m["_host_key"]
+    cpu_series = get_metric_series(host_key, 1) if HISTORY_ENABLED else []
+    mem_series = get_metric_series(host_key, 2) if HISTORY_ENABLED else []
+    disk_series = get_metric_series(host_key, 3) if HISTORY_ENABLED else []
+    temp_series = get_metric_series(host_key, 4) if HISTORY_ENABLED else []
+
+    cpu_spark = sparkline(cpu_series, 0, 100, threshold_color(cpu, 70, 90))
+    mem_spark = sparkline(mem_series, 0, 100, threshold_color(mem, 70, 90))
+    disk_spark = sparkline(disk_series, 0, 100, threshold_color(disk, 70, 90))
+    temp_spark = sparkline(temp_series, 20, 90, temp_color(temp), width=60, height=16)
+
+    cpu_icon_color = threshold_color(cpu, 70, 90)
+    mem_icon_color = threshold_color(mem, 70, 90)
+    disk_icon_color = threshold_color(disk, 70, 90)
+    t_color = temp_color(temp)
+
     return f'''
     <div class="card">
         <div class="card-header">
@@ -111,20 +281,23 @@ def render_card(m):
         </div>
 
         <div class="row">
-            <span class="label">CPU {cpu:.0f}%</span>
+            <span class="label"><span style="color:{cpu_icon_color}">&#9881;&#65039;</span> CPU {cpu:.0f}%</span>
             {bar(cpu)}
+            {cpu_spark}
         </div>
         <div class="row">
-            <span class="label">Mem {mem:.0f}% ({m["memory"]["used_gb"]}/{m["memory"]["total_gb"]} GB)</span>
+            <span class="label"><span style="color:{mem_icon_color}">&#128190;</span> Mem {mem:.0f}% ({m["memory"]["used_gb"]}/{m["memory"]["total_gb"]} GB)</span>
             {bar(mem)}
+            {mem_spark}
         </div>
         <div class="row">
-            <span class="label">Disk {disk:.0f}% ({m["disk"]["used_gb"]}/{m["disk"]["total_gb"]} GB)</span>
+            <span class="label"><span style="color:{disk_icon_color}">&#128451;&#65039;</span> Disk {disk:.0f}% ({m["disk"]["used_gb"]}/{m["disk"]["total_gb"]} GB)</span>
             {bar(disk)}
+            {disk_spark}
         </div>
         <div class="stats-line">
-            <span>🌡 {temp_str}</span>
-            <span>⏱ up {m["uptime_hours"]}h</span>
+            <span><span style="color:{t_color}">&#127777;&#65039;</span> {temp_str} {temp_spark}</span>
+            <span>&#9201;&#65039; up {m["uptime_hours"]}h</span>
             <span>{m.get("tailscale_ip") or ""}</span>
         </div>
     </div>'''
@@ -161,10 +334,13 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .label {{ font-size:12px; color:#c8c8c8; display:block; margin-bottom:3px; }}
   .bar-track {{ background:#2c2f38; border-radius:6px; height:7px; overflow:hidden; }}
   .bar-fill {{ height:100%; border-radius:6px; }}
+  .spark {{ display:block; width:100%; height:16px; margin-top:4px; }}
   .stats-line {{
-    display:flex; justify-content:space-between; font-size:11px;
+    display:flex; justify-content:space-between; align-items:center; font-size:11px;
     color:#999; margin-top:10px;
   }}
+  .stats-line span {{ display:inline-flex; align-items:center; gap:4px; }}
+  .stats-line .spark {{ width:60px; height:14px; margin-top:0; }}
 </style>
 </head>
 <body>
@@ -177,6 +353,15 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path.rstrip("/") == "/history.json":
+            body = json.dumps(get_history_snapshot()).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         if self.path.rstrip("/") == "/metrics.json":
             results = [fetch_metrics(m) for m in MINIS]
             body = json.dumps(results, indent=2).encode()
@@ -203,6 +388,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    if HISTORY_ENABLED:
+        threading.Thread(target=history_poll_loop, daemon=True).start()
+        print(
+            f"history polling every {HISTORY_POLL_SECONDS}s, "
+            f"retaining {CONFIG['history_retention_days']}d -> {HISTORY_PATH}"
+        )
+
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"dashboard listening on :{PORT}  (open http://<this-machine-tailscale-ip>:{PORT})")
     server.serve_forever()
